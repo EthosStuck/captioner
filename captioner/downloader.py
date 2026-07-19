@@ -46,18 +46,20 @@ class SubtitleDownloader:
         languages: Optional[List[str]] = None,
         min_score: int = 0,
         force: bool = False,
-    ) -> Tuple[Optional[Path], str]:
+        download_multiple: bool = False,
+    ) -> List[Tuple[Path, str]]:
         """
-        Download best matching subtitles for a video.
+        Download matching subtitles for a video.
         
         Args:
             video_path: Path to video file
             languages: List of language codes (e.g., ['zho', 'eng']). If None, uses default priority.
             min_score: Minimum score for subtitle acceptance (0-100)
             force: Force download even if subtitle already exists
+            download_multiple: Download all requested languages instead of just the best match
             
         Returns:
-            Tuple of (subtitle_path, language_code) or (None, '') if failed
+            List of (subtitle_path, language_code) tuples
         """
         if not self.is_available():
             raise RuntimeError("subliminal is not installed. Install with: pip install subliminal")
@@ -69,7 +71,7 @@ class SubtitleDownloader:
             video = scan_video(str(video_path))
         except Exception as e:
             logger.error(f"Failed to scan video: {e}")
-            return None, ""
+            return []
         
         # Determine languages to search
         if languages:
@@ -80,19 +82,21 @@ class SubtitleDownloader:
         
         logger.info(f"Searching for subtitles in languages: {lang_set}")
         
-        # Check if subtitle already exists (unless force)
+        # Check if subtitles already exist (unless force)
         if not force:
-            existing_subs = self._find_existing_subtitles(video_path)
+            existing_subs = self._find_existing_subtitles(video_path, languages)
             if existing_subs:
-                logger.info(f"Subtitle already exists: {existing_subs}")
-                # Check if any existing subtitle matches our language preferences
-                for existing_path in existing_subs:
-                    lang = self._extract_language_from_filename(existing_path)
+                logger.info(f"Subtitles already exist: {existing_subs}")
+                # Return existing subtitles that match our language preferences
+                results = []
+                for existing_path, lang in existing_subs:
                     if lang and Language(lang) in lang_set:
                         logger.info(f"Using existing subtitle: {existing_path}")
-                        return existing_path, lang
+                        results.append((existing_path, lang))
+                if results:
+                    return results
         
-        # Download best subtitles
+        # Download subtitles
         try:
             kwargs = {"min_score": min_score}
             if self.providers:
@@ -102,46 +106,72 @@ class SubtitleDownloader:
             
             if not subtitles or not subtitles[video]:
                 logger.warning(f"No subtitles found for {video_path}")
-                return None, ""
+                return []
             
-            # Get the best subtitle (first in list)
-            best_subtitle = subtitles[video][0]
-            logger.info(f"Found subtitle: {best_subtitle.language}")
+            results = []
             
-            # Save subtitle
-            saved_subtitles = save_subtitles(video, [best_subtitle], single=True)
+            if download_multiple:
+                # Download one subtitle per language
+                downloaded_langs = set()
+                for subtitle in subtitles[video]:
+                    lang_code = str(subtitle.language)
+                    if lang_code not in downloaded_langs:
+                        # Save subtitle (subliminal saves next to video with language code)
+                        save_subtitles(video, [subtitle], encoding='utf-8')
+                        # subliminal saves to video.{lang}.srt
+                        subtitle_path = video_path.with_suffix(f'.{lang_code}.srt')
+                        if subtitle_path.exists():
+                            results.append((subtitle_path, lang_code))
+                            downloaded_langs.add(lang_code)
+                            logger.info(f"Saved subtitle: {subtitle_path}")
+                        else:
+                            logger.warning(f"Subtitle not found at expected path: {subtitle_path}")
+            else:
+                # Download only the best subtitle
+                best_subtitle = subtitles[video][0]
+                lang_code = str(best_subtitle.language)
+                
+                # Save subtitle (subliminal saves next to video with language code)
+                save_subtitles(video, [best_subtitle], encoding='utf-8')
+                # subliminal saves to video.{lang}.srt
+                subtitle_path = video_path.with_suffix(f'.{lang_code}.srt')
+                if subtitle_path.exists():
+                    results.append((subtitle_path, lang_code))
+                    logger.info(f"Saved subtitle: {subtitle_path}")
+                else:
+                    logger.warning(f"Subtitle not found at expected path: {subtitle_path}")
+                    return []
             
-            if not saved_subtitles:
-                logger.error("Failed to save subtitle")
-                return None, ""
-            
-            # The subtitle is saved next to the video with .srt extension
-            subtitle_path = video_path.with_suffix('.srt')
-            logger.info(f"Subtitle saved to: {subtitle_path}")
-            
-            return subtitle_path, str(best_subtitle.language)
+            return results
             
         except Exception as e:
             logger.error(f"Failed to download subtitles: {e}")
-            return None, ""
+            return []
     
-    def _find_existing_subtitles(self, video_path: Path) -> List[Path]:
-        """Find existing subtitle files for the video."""
+    def _find_existing_subtitles(self, video_path: Path, languages: Optional[List[str]] = None) -> List[Tuple[Path, str]]:
+        """Find existing subtitle files for the video with their language codes."""
         video_dir = video_path.parent
         video_stem = video_path.stem
         
         existing = []
         for ext in ['.srt', '.ass', '.ssa', '.sub']:
-            # Check for exact match
+            # Check for exact match (no language code)
             sub_path = video_dir / f"{video_stem}{ext}"
             if sub_path.exists():
-                existing.append(sub_path)
+                existing.append((sub_path, ''))
             
             # Check for language-tagged versions
-            for lang in ['en', 'eng', 'zh', 'zho', 'chs', 'cht']:
-                sub_path = video_dir / f"{video_stem}.{lang}{ext}"
-                if sub_path.exists():
-                    existing.append(sub_path)
+            if languages:
+                for lang in languages:
+                    sub_path = video_dir / f"{video_stem}.{lang}{ext}"
+                    if sub_path.exists():
+                        existing.append((sub_path, lang))
+            else:
+                # Check common language codes
+                for lang in ['en', 'eng', 'zh', 'zho', 'chs', 'cht']:
+                    sub_path = video_dir / f"{video_stem}.{lang}{ext}"
+                    if sub_path.exists():
+                        existing.append((sub_path, lang))
         
         return existing
     
